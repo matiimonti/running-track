@@ -500,4 +500,143 @@ def extend_path_to_target(
     return extended
 
 
+# ---------------------------------------------------------------------------
+# Waypoint extraction
+# ---------------------------------------------------------------------------
 
+@dataclass
+class Waypoint:
+    lat: float
+    lng: float
+    street_name: str        # OSM name of the outgoing edge, or "" if unnamed
+    turn: str               # "start" | "straight" | "slight_right" | "right" |
+                            # "sharp_right" | "u_turn" | "sharp_left" | "left" |
+                            # "slight_left" | "end"
+    distance_from_prev_m: float   # length of the edge arriving at this node
+    elevation_m: float      # metres above sea level
+
+
+def _bearing(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Compute the forward bearing in degrees [0, 360) from point 1 to point 2."""
+    lat1_r = math.radians(lat1)
+    lat2_r = math.radians(lat2)
+    d_lng = math.radians(lng2 - lng1)
+    x = math.sin(d_lng) * math.cos(lat2_r)
+    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(d_lng)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _turn_direction(incoming_bearing: float, outgoing_bearing: float) -> str:
+    """Classify a turn from the change in bearing."""
+    delta = (outgoing_bearing - incoming_bearing + 360) % 360
+    if delta < 22.5 or delta >= 337.5:
+        return "straight"
+    elif delta < 67.5:
+        return "slight_right"
+    elif delta < 112.5:
+        return "right"
+    elif delta < 157.5:
+        return "sharp_right"
+    elif delta < 202.5:
+        return "u_turn"
+    elif delta < 247.5:
+        return "sharp_left"
+    elif delta < 292.5:
+        return "left"
+    else:
+        return "slight_left"
+
+
+def _edge_name(G: nx.MultiDiGraph, u: int, v: int) -> str:
+    """Return the OSM name of the cheapest (shortest) edge between u and v."""
+    edge_data = min(G[u][v].values(), key=lambda d: d.get("length", float("inf")))
+    name = edge_data.get("name", "")
+    if isinstance(name, list):
+        name = name[0]
+    return str(name) if name else ""
+
+
+def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
+    """
+    Extract turn-by-turn waypoints from a node path.
+
+    A waypoint is emitted at:
+      - The start node
+      - Any node where the turn angle exceeds 22.5° (not "straight")
+      - Any node where the street name changes
+      - The end node
+
+    Each waypoint carries: lat/lng, street name of the outgoing edge,
+    turn direction, cumulative distance from the previous waypoint, and elevation.
+    """
+    if len(path) < 2:
+        raise ValueError("Path must have at least 2 nodes to extract waypoints.")
+
+    waypoints: list[Waypoint] = []
+
+    # Accumulated distance since the last emitted waypoint
+    dist_since_last = 0.0
+
+    # --- Start node ---
+    start = path[0]
+    waypoints.append(Waypoint(
+        lat=G.nodes[start]["y"],
+        lng=G.nodes[start]["x"],
+        street_name=_edge_name(G, path[0], path[1]),
+        turn="start",
+        distance_from_prev_m=0.0,
+        elevation_m=G.nodes[start].get("elevation", 0.0),
+    ))
+
+    # Walk interior nodes
+    for i in range(1, len(path) - 1):
+        prev_node = path[i - 1]
+        curr_node = path[i]
+        next_node = path[i + 1]
+
+        # Accumulate distance of edge arriving at curr_node
+        edge_in = min(G[prev_node][curr_node].values(), key=lambda d: d.get("length", float("inf")))
+        dist_since_last += edge_in.get("length", 0.0)
+
+        # Compute bearings
+        in_bearing = _bearing(
+            G.nodes[prev_node]["y"], G.nodes[prev_node]["x"],
+            G.nodes[curr_node]["y"], G.nodes[curr_node]["x"],
+        )
+        out_bearing = _bearing(
+            G.nodes[curr_node]["y"], G.nodes[curr_node]["x"],
+            G.nodes[next_node]["y"], G.nodes[next_node]["x"],
+        )
+
+        turn = _turn_direction(in_bearing, out_bearing)
+        outgoing_name = _edge_name(G, curr_node, next_node)
+        incoming_name = _edge_name(G, prev_node, curr_node)
+
+        # Emit if turn is meaningful or street name changes
+        if turn != "straight" or outgoing_name != incoming_name:
+            waypoints.append(Waypoint(
+                lat=G.nodes[curr_node]["y"],
+                lng=G.nodes[curr_node]["x"],
+                street_name=outgoing_name,
+                turn=turn,
+                distance_from_prev_m=round(dist_since_last, 1),
+                elevation_m=G.nodes[curr_node].get("elevation", 0.0),
+            ))
+            dist_since_last = 0.0
+
+    # --- End node ---
+    end = path[-1]
+    last_edge = min(G[path[-2]][end].values(), key=lambda d: d.get("length", float("inf")))
+    dist_since_last += last_edge.get("length", 0.0)
+
+    waypoints.append(Waypoint(
+        lat=G.nodes[end]["y"],
+        lng=G.nodes[end]["x"],
+        street_name="",
+        turn="end",
+        distance_from_prev_m=round(dist_since_last, 1),
+        elevation_m=G.nodes[end].get("elevation", 0.0),
+    ))
+
+    logger.info("waypoints_extracted", count=len(waypoints), path_nodes=len(path))
+    return waypoints
