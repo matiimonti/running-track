@@ -134,7 +134,9 @@ def compute_edge_cost(edge_data: dict, profile: RunProfile) -> float:
 
     length = edge_data.get("length", 1.0)
     surface_type = edge_data.get("surface_type", "unknown")
-    grade = abs(edge_data.get("grade", 0.0))  # use absolute grade — both up and downhill add cost
+    grade = abs(
+        edge_data.get("grade", 0.0)
+    )  # use absolute grade — both up and downhill add cost
 
     surface_weight = profile.surface_weights.get(surface_type, _DEFAULT_SURFACE_WEIGHT)
     highway_weight = profile.highway_weights.get(highway_type, _DEFAULT_HIGHWAY_WEIGHT)
@@ -147,7 +149,11 @@ def compute_edge_cost(edge_data: dict, profile: RunProfile) -> float:
         grade_multiplier = (
             1.0
             + (profile.grade_penalty_per_pct * profile.max_comfortable_grade)
-            + (profile.grade_penalty_per_pct * 3.0 * (grade - profile.max_comfortable_grade))
+            + (
+                profile.grade_penalty_per_pct
+                * 3.0
+                * (grade - profile.max_comfortable_grade)
+            )
         )
 
     return length * surface_weight * highway_weight * grade_multiplier
@@ -160,6 +166,7 @@ def build_used_edges(path: list[int]) -> set[tuple[int, int]]:
     """
     return {(path[i], path[i + 1]) for i in range(len(path) - 1)}
 
+
 def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = None):
     """
     Return a weight function compatible with nx.astar_path(weight=...).
@@ -167,6 +174,7 @@ def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = 
     nx calls it as weight(u, v, edge_data) for each candidate edge.
     If used_edges is provided, edges already in the set get a ×5 penalty.
     """
+
     def cost_fn(u: int, v: int, edge_data: dict) -> float:
         base = compute_edge_cost(edge_data, profile)
         if used_edges and (u, v) in used_edges:
@@ -176,7 +184,9 @@ def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = 
     return cost_fn
 
 
-def _project_coordinate(lat: float, lng: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+def _project_coordinate(
+    lat: float, lng: float, bearing_deg: float, distance_km: float
+) -> tuple[float, float]:
     """
     Project a coordinate distance_km away from (lat, lng) along bearing_deg.
     bearing_deg: 0 = north, 90 = east, 180 = south, 270 = west.
@@ -197,6 +207,7 @@ def _project_coordinate(lat: float, lng: float, bearing_deg: float, distance_km:
     )
     return math.degrees(new_lat_r), math.degrees(new_lng_r)
 
+
 def _haversine_cost_heuristic(G: nx.MultiDiGraph, goal: int):
     """
     Return an A* heuristic function: estimated cost from any node to goal.
@@ -208,17 +219,23 @@ def _haversine_cost_heuristic(G: nx.MultiDiGraph, goal: int):
     def heuristic(u: int, v: int) -> float:
         node_lat = G.nodes[u]["y"]
         node_lng = G.nodes[u]["x"]
-        return haversine_km(node_lat, node_lng, goal_lat, goal_lng) * 1000  # convert to metres
+        return (
+            haversine_km(node_lat, node_lng, goal_lat, goal_lng) * 1000
+        )  # convert to metres
 
     return heuristic
+
 
 def _path_length_m(G: nx.MultiDiGraph, path: list[int]) -> float:
     """Sum edge lengths along a node path in metres."""
     total = 0.0
     for i in range(len(path) - 1):
-        edge_data = min(G[path[i]][path[i + 1]].values(), key=lambda d: d.get("length", 0))
+        edge_data = min(
+            G[path[i]][path[i + 1]].values(), key=lambda d: d.get("length", 0)
+        )
         total += edge_data.get("length", 0.0)
     return total
+
 
 def generate_loop(
     G: nx.MultiDiGraph,
@@ -249,7 +266,9 @@ def generate_loop(
     mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
 
     if mid_node == start_node:
-        raise ValueError("Midpoint snapped to start node — graph may be too sparse for this distance.")
+        raise ValueError(
+            "Midpoint snapped to start node — graph may be too sparse for this distance."
+        )
 
     # Pass 1: outbound (no penalty)
     outbound_cost_fn = make_cost_fn(profile, used_edges=None)
@@ -276,7 +295,9 @@ def generate_loop(
             weight=return_cost_fn,
         )
     except nx.NetworkXNoPath:
-        raise ValueError(f"No return path found from midpoint node {mid_node} to start.")
+        raise ValueError(
+            f"No return path found from midpoint node {mid_node} to start."
+        )
 
     # Combine: outbound + return (drop duplicate midpoint node at the join)
     full_path = outbound + return_path[1:]
@@ -302,6 +323,7 @@ def generate_loop(
     )
     return full_path
 
+
 def _out_and_back(
     G: nx.MultiDiGraph,
     start_node: int,
@@ -310,15 +332,14 @@ def _out_and_back(
 ) -> list[int]:
     """
     Generate an out-and-back route as a last resort.
-    Finds the node closest to D/4 away (so the full out-and-back ≈ D/2 * 2 = D),
-    then returns outbound + reversed outbound.
+    Projects midpoint D/2 away so outbound + return ≈ D total.
     """
     start_lat = G.nodes[start_node]["y"]
     start_lng = G.nodes[start_node]["x"]
 
     bearing = random.uniform(0, 360)
     mid_lat, mid_lng = _project_coordinate(
-        start_lat, start_lng, bearing, (target_distance_m / 1000) / 4
+        start_lat, start_lng, bearing, (target_distance_m / 1000) / 2
     )
     mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
 
@@ -326,9 +347,17 @@ def _out_and_back(
     try:
         outbound = nx.astar_path(G, start_node, mid_node, weight=cost_fn)
     except nx.NetworkXNoPath:
-        raise ValueError("Out-and-back fallback failed: no path found.")
+        raise ValueError("Out-and-back fallback failed: no outbound path found.")
 
-    return outbound + list(reversed(outbound[:-1]))
+    # Route back via A* — reversing node order is wrong on a directed graph
+    # because G[v][u] may not exist even when G[u][v] does.
+    try:
+        return_path = nx.astar_path(G, mid_node, start_node, weight=cost_fn)
+    except nx.NetworkXNoPath:
+        raise ValueError("Out-and-back fallback failed: no return path found.")
+
+    return outbound + return_path[1:]
+
 
 def generate_loop_with_fallback(
     G: nx.MultiDiGraph,
@@ -363,20 +392,26 @@ def generate_loop_with_fallback(
         bearing = _pick_bearing()
         mid_dist_km = (target_distance_m / 1000) * profile.midpoint_factor
 
-        mid_lat, mid_lng = _project_coordinate(start_lat, start_lng, bearing, mid_dist_km)
+        mid_lat, mid_lng = _project_coordinate(
+            start_lat, start_lng, bearing, mid_dist_km
+        )
         mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
         if mid_node == start_node:
             return None
 
         try:
             outbound = nx.astar_path(
-                G, start_node, mid_node,
+                G,
+                start_node,
+                mid_node,
                 heuristic=_haversine_cost_heuristic(G, mid_node),
                 weight=make_cost_fn(profile),
             )
             used = build_used_edges(outbound)
             return_path = nx.astar_path(
-                G, mid_node, start_node,
+                G,
+                mid_node,
+                start_node,
                 heuristic=_haversine_cost_heuristic(G, start_node),
                 weight=make_cost_fn(profile, used_edges=used),
             )
@@ -394,20 +429,35 @@ def generate_loop_with_fallback(
     for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
         path = _try_loop(0.10)
         if path:
-            logger.info("loop_found", method="loop_10", target_m=round(target_distance_m), profile=profile.name)
+            logger.info(
+                "loop_found",
+                method="loop_10",
+                target_m=round(target_distance_m),
+                profile=profile.name,
+            )
             return path, "loop_10"
 
     # Stage 2: ±20%
     for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
         path = _try_loop(0.20)
         if path:
-            logger.info("loop_found", method="loop_20", target_m=round(target_distance_m), profile=profile.name)
+            logger.info(
+                "loop_found",
+                method="loop_20",
+                target_m=round(target_distance_m),
+                profile=profile.name,
+            )
             return path, "loop_20"
 
     # Stage 3: out-and-back
     try:
         path = _out_and_back(G, start_node, target_distance_m, profile)
-        logger.info("loop_found", method="out_and_back", target_m=round(target_distance_m), profile=profile.name)
+        logger.info(
+            "loop_found",
+            method="out_and_back",
+            target_m=round(target_distance_m),
+            profile=profile.name,
+        )
         return path, "out_and_back"
     except ValueError:
         pass
@@ -504,12 +554,12 @@ def extend_path_to_target(
 class Waypoint:
     lat: float
     lng: float
-    street_name: str        # OSM name of the outgoing edge, or "" if unnamed
-    turn: str               # "start" | "straight" | "slight_right" | "right" |
-                            # "sharp_right" | "u_turn" | "sharp_left" | "left" |
-                            # "slight_left" | "end"
-    distance_from_prev_m: float   # length of the edge arriving at this node
-    elevation_m: float      # metres above sea level
+    street_name: str  # OSM name of the outgoing edge, or "" if unnamed
+    turn: str  # "start" | "straight" | "slight_right" | "right" |
+    # "sharp_right" | "u_turn" | "sharp_left" | "left" |
+    # "slight_left" | "end"
+    distance_from_prev_m: float  # length of the edge arriving at this node
+    elevation_m: float  # metres above sea level
 
 
 def _bearing(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -518,7 +568,9 @@ def _bearing(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     lat2_r = math.radians(lat2)
     d_lng = math.radians(lng2 - lng1)
     x = math.sin(d_lng) * math.cos(lat2_r)
-    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(d_lng)
+    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(
+        lat2_r
+    ) * math.cos(d_lng)
     return (math.degrees(math.atan2(x, y)) + 360) % 360
 
 
@@ -575,14 +627,16 @@ def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
 
     # --- Start node ---
     start = path[0]
-    waypoints.append(Waypoint(
-        lat=G.nodes[start]["y"],
-        lng=G.nodes[start]["x"],
-        street_name=_edge_name(G, path[0], path[1]),
-        turn="start",
-        distance_from_prev_m=0.0,
-        elevation_m=G.nodes[start].get("elevation", 0.0),
-    ))
+    waypoints.append(
+        Waypoint(
+            lat=G.nodes[start]["y"],
+            lng=G.nodes[start]["x"],
+            street_name=_edge_name(G, path[0], path[1]),
+            turn="start",
+            distance_from_prev_m=0.0,
+            elevation_m=G.nodes[start].get("elevation", 0.0),
+        )
+    )
 
     # Walk interior nodes
     for i in range(1, len(path) - 1):
@@ -591,17 +645,24 @@ def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
         next_node = path[i + 1]
 
         # Accumulate distance of edge arriving at curr_node
-        edge_in = min(G[prev_node][curr_node].values(), key=lambda d: d.get("length", float("inf")))
+        edge_in = min(
+            G[prev_node][curr_node].values(),
+            key=lambda d: d.get("length", float("inf")),
+        )
         dist_since_last += edge_in.get("length", 0.0)
 
         # Compute bearings
         in_bearing = _bearing(
-            G.nodes[prev_node]["y"], G.nodes[prev_node]["x"],
-            G.nodes[curr_node]["y"], G.nodes[curr_node]["x"],
+            G.nodes[prev_node]["y"],
+            G.nodes[prev_node]["x"],
+            G.nodes[curr_node]["y"],
+            G.nodes[curr_node]["x"],
         )
         out_bearing = _bearing(
-            G.nodes[curr_node]["y"], G.nodes[curr_node]["x"],
-            G.nodes[next_node]["y"], G.nodes[next_node]["x"],
+            G.nodes[curr_node]["y"],
+            G.nodes[curr_node]["x"],
+            G.nodes[next_node]["y"],
+            G.nodes[next_node]["x"],
         )
 
         turn = _turn_direction(in_bearing, out_bearing)
@@ -610,29 +671,35 @@ def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
 
         # Emit if turn is meaningful or street name changes
         if turn != "straight" or outgoing_name != incoming_name:
-            waypoints.append(Waypoint(
-                lat=G.nodes[curr_node]["y"],
-                lng=G.nodes[curr_node]["x"],
-                street_name=outgoing_name,
-                turn=turn,
-                distance_from_prev_m=round(dist_since_last, 1),
-                elevation_m=G.nodes[curr_node].get("elevation", 0.0),
-            ))
+            waypoints.append(
+                Waypoint(
+                    lat=G.nodes[curr_node]["y"],
+                    lng=G.nodes[curr_node]["x"],
+                    street_name=outgoing_name,
+                    turn=turn,
+                    distance_from_prev_m=round(dist_since_last, 1),
+                    elevation_m=G.nodes[curr_node].get("elevation", 0.0),
+                )
+            )
             dist_since_last = 0.0
 
     # --- End node ---
     end = path[-1]
-    last_edge = min(G[path[-2]][end].values(), key=lambda d: d.get("length", float("inf")))
+    last_edge = min(
+        G[path[-2]][end].values(), key=lambda d: d.get("length", float("inf"))
+    )
     dist_since_last += last_edge.get("length", 0.0)
 
-    waypoints.append(Waypoint(
-        lat=G.nodes[end]["y"],
-        lng=G.nodes[end]["x"],
-        street_name="",
-        turn="end",
-        distance_from_prev_m=round(dist_since_last, 1),
-        elevation_m=G.nodes[end].get("elevation", 0.0),
-    ))
+    waypoints.append(
+        Waypoint(
+            lat=G.nodes[end]["y"],
+            lng=G.nodes[end]["x"],
+            street_name="",
+            turn="end",
+            distance_from_prev_m=round(dist_since_last, 1),
+            elevation_m=G.nodes[end].get("elevation", 0.0),
+        )
+    )
 
     logger.info("waypoints_extracted", count=len(waypoints), path_nodes=len(path))
     return waypoints
@@ -640,11 +707,13 @@ def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
 
 @dataclass
 class ElevationPoint:
-    distance_m: float   # cumulative distance along the route at this point
+    distance_m: float  # cumulative distance along the route at this point
     elevation_m: float  # metres above sea level
 
 
-def extract_elevation_profile(G: nx.MultiDiGraph, path: list[int]) -> list[ElevationPoint]:
+def extract_elevation_profile(
+    G: nx.MultiDiGraph, path: list[int]
+) -> list[ElevationPoint]:
     """
     Build an elevation profile as a list of (distance_along_route, elevation) pairs.
 
@@ -657,10 +726,12 @@ def extract_elevation_profile(G: nx.MultiDiGraph, path: list[int]) -> list[Eleva
     profile: list[ElevationPoint] = []
     cumulative_m = 0.0
 
-    profile.append(ElevationPoint(
-        distance_m=0.0,
-        elevation_m=G.nodes[path[0]].get("elevation", 0.0),
-    ))
+    profile.append(
+        ElevationPoint(
+            distance_m=0.0,
+            elevation_m=G.nodes[path[0]].get("elevation", 0.0),
+        )
+    )
 
     for i in range(1, len(path)):
         edge_data = min(
@@ -668,10 +739,12 @@ def extract_elevation_profile(G: nx.MultiDiGraph, path: list[int]) -> list[Eleva
             key=lambda d: d.get("length", float("inf")),
         )
         cumulative_m += edge_data.get("length", 0.0)
-        profile.append(ElevationPoint(
-            distance_m=round(cumulative_m, 1),
-            elevation_m=G.nodes[path[i]].get("elevation", 0.0),
-        ))
+        profile.append(
+            ElevationPoint(
+                distance_m=round(cumulative_m, 1),
+                elevation_m=G.nodes[path[i]].get("elevation", 0.0),
+            )
+        )
 
     logger.info(
         "elevation_profile_extracted",
@@ -684,10 +757,10 @@ def extract_elevation_profile(G: nx.MultiDiGraph, path: list[int]) -> list[Eleva
 @dataclass
 class RouteMetadata:
     total_distance_m: float
-    elevation_gain_m: float          # sum of all uphill segments
-    elevation_loss_m: float          # sum of all downhill segments (positive value)
-    estimated_time_min: float        # based on profile pace
-    surface_breakdown: dict          # surface_type -> % of total distance (0–100)
+    elevation_gain_m: float  # sum of all uphill segments
+    elevation_loss_m: float  # sum of all downhill segments (positive value)
+    estimated_time_min: float  # based on profile pace
+    surface_breakdown: dict  # surface_type -> % of total distance (0–100)
 
 
 def compute_route_metadata(
@@ -730,7 +803,9 @@ def compute_route_metadata(
 
     # Convert surface lengths to percentages
     surface_breakdown = {
-        surface: round((length / total_distance_m) * 100, 1) if total_distance_m > 0 else 0.0
+        surface: (
+            round((length / total_distance_m) * 100, 1) if total_distance_m > 0 else 0.0
+        )
         for surface, length in surface_lengths.items()
     }
 
@@ -766,7 +841,7 @@ def score_route(G: nx.MultiDiGraph, path: list[int], profile: RunProfile) -> int
 
     Returns an integer in [0, 100].
     """
-    _SURFACE_WEIGHT_CAP = 5.0   # weights above this are treated as worst-case
+    _SURFACE_WEIGHT_CAP = 5.0  # weights above this are treated as worst-case
     _WEIGHT_SURFACE = 40
     _WEIGHT_GRADE = 40
     _WEIGHT_POPULARITY = 20
@@ -791,7 +866,9 @@ def score_route(G: nx.MultiDiGraph, path: list[int], profile: RunProfile) -> int
         surface_type = edge_data.get("surface_type", "unknown")
         surface_w = profile.surface_weights.get(surface_type, _DEFAULT_SURFACE_WEIGHT)
         surface_w = min(surface_w, _SURFACE_WEIGHT_CAP)
-        surface_score = 1.0 - (surface_w - min_surface_w) / (_SURFACE_WEIGHT_CAP - min_surface_w)
+        surface_score = 1.0 - (surface_w - min_surface_w) / (
+            _SURFACE_WEIGHT_CAP - min_surface_w
+        )
         surface_score_sum += surface_score * length
 
         # Grade score: 1.0 at or below comfort threshold, decays above it
@@ -816,7 +893,9 @@ def score_route(G: nx.MultiDiGraph, path: list[int], profile: RunProfile) -> int
     grade_component = (grade_score_sum / total_length) * _WEIGHT_GRADE
 
     if popularity_data_present:
-        popularity_component = (popularity_score_sum / total_length) * _WEIGHT_POPULARITY
+        popularity_component = (
+            popularity_score_sum / total_length
+        ) * _WEIGHT_POPULARITY
     else:
         popularity_component = _WEIGHT_POPULARITY * 0.5  # neutral when no data
 
@@ -832,3 +911,62 @@ def score_route(G: nx.MultiDiGraph, path: list[int], profile: RunProfile) -> int
         profile=profile.name,
     )
     return score
+
+
+@dataclass
+class RouteResult:
+    coordinates: list[tuple[float, float]]  # (lat, lng) pairs — always present
+    method: str  # "loop_10" | "loop_20" | "out_and_back" | "graphhopper" | "ors"
+    node_path: list[int] | None = None  # graph node IDs — only set for OSMnx routes
+
+
+def generate_route_with_external_fallback(
+    G: nx.MultiDiGraph,
+    start_node: int,
+    target_distance_m: float,
+    profile: RunProfile,
+    base_bearing: float | None = None,
+    graphhopper_api_key: str = "",
+) -> RouteResult:
+    """
+    Full routing pipeline with external fallback:
+      1. OSMnx A* loop generation (±10% → ±20% → out-and-back)
+      2. GraphHopper round-trip API if OSMnx fails
+
+    Returns a RouteResult with coordinates and the method used.
+    node_path is set only for OSMnx routes — external fallbacks return coordinates only.
+    """
+    # Stage 1: OSMnx
+    try:
+        node_path, method = generate_loop_with_fallback(
+            G, start_node, target_distance_m, profile, base_bearing=base_bearing
+        )
+        coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in node_path]
+        return RouteResult(coordinates=coords, method=method, node_path=node_path)
+    except ValueError as osmnx_err:
+        logger.warning("osmnx_failed", error=str(osmnx_err))
+
+    # Stage 2: GraphHopper
+    if graphhopper_api_key:
+        try:
+            from app.clients.graphhopper import fetch_round_trip
+
+            start_lat = G.nodes[start_node]["y"]
+            start_lng = G.nodes[start_node]["x"]
+            coords = fetch_round_trip(
+                start_lat,
+                start_lng,
+                target_distance_m,
+                profile.name,
+                graphhopper_api_key,
+            )
+            logger.info("graphhopper_fallback_used", target_m=round(target_distance_m))
+            return RouteResult(coordinates=coords, method="graphhopper", node_path=None)
+        except Exception as gh_err:
+            logger.warning("graphhopper_failed", error=str(gh_err))
+
+    raise ValueError(
+        f"All routing methods failed for {target_distance_m / 1000:.1f} km "
+        f"from node {start_node}. "
+        "Provide a valid graphhopper_api_key to enable external fallback."
+    )
