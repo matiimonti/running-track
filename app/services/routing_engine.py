@@ -335,29 +335,35 @@ def generate_loop_with_fallback(
     start_node: int,
     target_distance_m: float,
     profile: RunProfile,
+    base_bearing: float | None = None,
 ) -> tuple[list[int], str]:
     """
     Attempt loop generation with a progressive fallback ladder:
-      1. ±10% tolerance, 3 random bearings
-      2. ±20% tolerance, 3 random bearings
+      1. ±10% tolerance, 3 bearing attempts
+      2. ±20% tolerance, 3 bearing attempts
       3. Out-and-back
       4. Raise with a clear message
+
+    base_bearing: if provided, profile.bearing_offset is added to it so that
+    different run types fan out in different directions from the same start.
+    If None, a random base bearing is used each attempt.
 
     Returns (path, method) where method is one of:
       "loop_10", "loop_20", "out_and_back"
     """
-    # Monkey-patch generate_loop tolerance for ±20% attempts
-    # by temporarily wrapping the distance check — instead, pass
-    # tolerance as a parameter via a local helper.
+    start_lat = G.nodes[start_node]["y"]
+    start_lng = G.nodes[start_node]["x"]
+
+    def _pick_bearing() -> float:
+        """Pick a bearing: apply profile offset to base (or random if no base)."""
+        b = base_bearing if base_bearing is not None else random.uniform(0, 360)
+        return (b + profile.bearing_offset) % 360
 
     def _try_loop(tolerance: float) -> list[int] | None:
-        bearing = random.uniform(0, 360)
-        start_lat = G.nodes[start_node]["y"]
-        start_lng = G.nodes[start_node]["x"]
+        bearing = _pick_bearing()
+        mid_dist_km = (target_distance_m / 1000) * profile.midpoint_factor
 
-        mid_lat, mid_lng = _project_coordinate(
-            start_lat, start_lng, bearing, (target_distance_m / 1000) / 2
-        )
+        mid_lat, mid_lng = _project_coordinate(start_lat, start_lng, bearing, mid_dist_km)
         mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
         if mid_node == start_node:
             return None
@@ -388,20 +394,20 @@ def generate_loop_with_fallback(
     for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
         path = _try_loop(0.10)
         if path:
-            logger.info("loop_found", method="loop_10", target_m=round(target_distance_m))
+            logger.info("loop_found", method="loop_10", target_m=round(target_distance_m), profile=profile.name)
             return path, "loop_10"
 
     # Stage 2: ±20%
     for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
         path = _try_loop(0.20)
         if path:
-            logger.info("loop_found", method="loop_20", target_m=round(target_distance_m))
+            logger.info("loop_found", method="loop_20", target_m=round(target_distance_m), profile=profile.name)
             return path, "loop_20"
 
     # Stage 3: out-and-back
     try:
         path = _out_and_back(G, start_node, target_distance_m, profile)
-        logger.info("loop_found", method="out_and_back", target_m=round(target_distance_m))
+        logger.info("loop_found", method="out_and_back", target_m=round(target_distance_m), profile=profile.name)
         return path, "out_and_back"
     except ValueError:
         pass
