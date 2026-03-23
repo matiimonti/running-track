@@ -9,6 +9,8 @@ _DEFAULT_SURFACE_WEIGHT = 2.0  # cost for unknown surface type
 _DEFAULT_HIGHWAY_WEIGHT = 1.5  # cost for unknown highway type
 _REPETITION_PENALTY = 5.0  # edges already used cost 5× more on return path
 _EARTH_RADIUS_KM = 6371.0
+_FALLBACK_ATTEMPTS_PER_TOLERANCE = 3
+
 
 def snap_to_nearest_node(G: nx.MultiDiGraph, lat: float, lng: float) -> int:
     """
@@ -93,14 +95,12 @@ def compute_edge_cost(edge_data: dict, profile: RunProfile) -> float:
     return length * surface_weight * highway_weight * grade_multiplier
 
 
-
 def build_used_edges(path: list[int]) -> set[tuple[int, int]]:
     """
     Build a set of (u, v) edge tuples from a node path.
     Used to penalise re-traversal on the return leg.
     """
     return {(path[i], path[i + 1]) for i in range(len(path) - 1)}
-
 
 def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = None):
     """
@@ -139,7 +139,6 @@ def _project_coordinate(lat: float, lng: float, bearing_deg: float, distance_km:
     )
     return math.degrees(new_lat_r), math.degrees(new_lng_r)
 
-
 def _haversine_cost_heuristic(G: nx.MultiDiGraph, goal: int):
     """
     Return an A* heuristic function: estimated cost from any node to goal.
@@ -155,7 +154,6 @@ def _haversine_cost_heuristic(G: nx.MultiDiGraph, goal: int):
 
     return heuristic
 
-
 def _path_length_m(G: nx.MultiDiGraph, path: list[int]) -> float:
     """Sum edge lengths along a node path in metres."""
     total = 0.0
@@ -163,7 +161,6 @@ def _path_length_m(G: nx.MultiDiGraph, path: list[int]) -> float:
         edge_data = min(G[path[i]][path[i + 1]].values(), key=lambda d: d.get("length", 0))
         total += edge_data.get("length", 0.0)
     return total
-
 
 def generate_loop(
     G: nx.MultiDiGraph,
@@ -247,6 +244,196 @@ def generate_loop(
     )
     return full_path
 
+def _out_and_back(
+    G: nx.MultiDiGraph,
+    start_node: int,
+    target_distance_m: float,
+    profile: RunProfile,
+) -> list[int]:
+    """
+    Generate an out-and-back route as a last resort.
+    Finds the node closest to D/4 away (so the full out-and-back ≈ D/2 * 2 = D),
+    then returns outbound + reversed outbound.
+    """
+    start_lat = G.nodes[start_node]["y"]
+    start_lng = G.nodes[start_node]["x"]
+
+    bearing = random.uniform(0, 360)
+    mid_lat, mid_lng = _project_coordinate(
+        start_lat, start_lng, bearing, (target_distance_m / 1000) / 4
+    )
+    mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
+
+    cost_fn = make_cost_fn(profile, used_edges=None)
+    try:
+        outbound = nx.astar_path(G, start_node, mid_node, weight=cost_fn)
+    except nx.NetworkXNoPath:
+        raise ValueError("Out-and-back fallback failed: no path found.")
+
+    return outbound + list(reversed(outbound[:-1]))
+
+def generate_loop_with_fallback(
+    G: nx.MultiDiGraph,
+    start_node: int,
+    target_distance_m: float,
+    profile: RunProfile,
+) -> tuple[list[int], str]:
+    """
+    Attempt loop generation with a progressive fallback ladder:
+      1. ±10% tolerance, 3 random bearings
+      2. ±20% tolerance, 3 random bearings
+      3. Out-and-back
+      4. Raise with a clear message
+
+    Returns (path, method) where method is one of:
+      "loop_10", "loop_20", "out_and_back"
+    """
+    # Monkey-patch generate_loop tolerance for ±20% attempts
+    # by temporarily wrapping the distance check — instead, pass
+    # tolerance as a parameter via a local helper.
+
+    def _try_loop(tolerance: float) -> list[int] | None:
+        bearing = random.uniform(0, 360)
+        start_lat = G.nodes[start_node]["y"]
+        start_lng = G.nodes[start_node]["x"]
+
+        mid_lat, mid_lng = _project_coordinate(
+            start_lat, start_lng, bearing, (target_distance_m / 1000) / 2
+        )
+        mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
+        if mid_node == start_node:
+            return None
+
+        try:
+            outbound = nx.astar_path(
+                G, start_node, mid_node,
+                heuristic=_haversine_cost_heuristic(G, mid_node),
+                weight=make_cost_fn(profile),
+            )
+            used = build_used_edges(outbound)
+            return_path = nx.astar_path(
+                G, mid_node, start_node,
+                heuristic=_haversine_cost_heuristic(G, start_node),
+                weight=make_cost_fn(profile, used_edges=used),
+            )
+        except nx.NetworkXNoPath:
+            return None
+
+        full_path = outbound + return_path[1:]
+        actual_m = _path_length_m(G, full_path)
+        lower = target_distance_m * (1 - tolerance)
+        upper = target_distance_m * (1 + tolerance)
+
+        return full_path if lower <= actual_m <= upper else None
+
+    # Stage 1: ±10%
+    for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
+        path = _try_loop(0.10)
+        if path:
+            logger.info("loop_found", method="loop_10", target_m=round(target_distance_m))
+            return path, "loop_10"
+
+    # Stage 2: ±20%
+    for _ in range(_FALLBACK_ATTEMPTS_PER_TOLERANCE):
+        path = _try_loop(0.20)
+        if path:
+            logger.info("loop_found", method="loop_20", target_m=round(target_distance_m))
+            return path, "loop_20"
+
+    # Stage 3: out-and-back
+    try:
+        path = _out_and_back(G, start_node, target_distance_m, profile)
+        logger.info("loop_found", method="out_and_back", target_m=round(target_distance_m))
+        return path, "out_and_back"
+    except ValueError:
+        pass
+
+    raise ValueError(
+        f"Could not generate a route of {target_distance_m / 1000:.1f} km "
+        f"from node {start_node}. The graph may be too sparse or the area "
+        f"too constrained (dead ends, water, etc.)."
+    )
+
+
+def extend_path_to_target(
+    G: nx.MultiDiGraph,
+    path: list[int],
+    target_distance_m: float,
+    profile: RunProfile,
+) -> list[int]:
+    """
+    Extend a short path by appending low-cost edges until it reaches
+    the lower bound of the target distance range (target × 0.9).
+
+    The extension walks greedily from the last node, picking the
+    cheapest outgoing edge not already in the path. Then re-routes
+    back to start via A*.
+
+    Returns the extended path, or the original if no extension is needed
+    or possible.
+    """
+    lower = target_distance_m * 0.9
+    actual_m = _path_length_m(G, path)
+
+    if actual_m >= lower:
+        return path  # already long enough, nothing to do
+
+    start_node = path[0]
+    visited_nodes = set(path)
+    extended = list(path)
+
+    while _path_length_m(G, extended) < lower:
+        current = extended[-1]
+        best_next = None
+        best_cost = float("inf")
+
+        for neighbor in G.successors(current):
+            if neighbor in visited_nodes:
+                continue
+            edge_data = min(
+                G[current][neighbor].values(),
+                key=lambda d: d.get("length", float("inf")),
+            )
+            cost = compute_edge_cost(edge_data, profile)
+            if cost < best_cost:
+                best_cost = cost
+                best_next = neighbor
+
+        if best_next is None:
+            # No unvisited neighbors — can't extend further
+            break
+
+        extended.append(best_next)
+        visited_nodes.add(best_next)
+
+    # Re-route from current end back to start
+    if extended[-1] != start_node:
+        used = build_used_edges(extended)
+        return_cost_fn = make_cost_fn(profile, used_edges=used)
+        try:
+            return_leg = nx.astar_path(
+                G,
+                extended[-1],
+                start_node,
+                heuristic=_haversine_cost_heuristic(G, start_node),
+                weight=return_cost_fn,
+            )
+            extended = extended + return_leg[1:]
+        except nx.NetworkXNoPath:
+            logger.warning(
+                "extension_return_failed",
+                node=extended[-1],
+                start=start_node,
+            )
+            return path  # return original if we can't close the loop
+
+    logger.info(
+        "path_extended",
+        original_m=round(actual_m),
+        extended_m=round(_path_length_m(G, extended)),
+        target_m=round(target_distance_m),
+    )
+    return extended
 
 
 
