@@ -927,11 +927,13 @@ def generate_route_with_external_fallback(
     profile: RunProfile,
     base_bearing: float | None = None,
     graphhopper_api_key: str = "",
+    openrouteservice_api_key: str = "",
 ) -> RouteResult:
     """
-    Full routing pipeline with external fallback:
+    Full routing pipeline with external fallbacks:
       1. OSMnx A* loop generation (±10% → ±20% → out-and-back)
       2. GraphHopper round-trip API if OSMnx fails
+      3. OpenRouteService round-trip API if GraphHopper also fails
 
     Returns a RouteResult with coordinates and the method used.
     node_path is set only for OSMnx routes — external fallbacks return coordinates only.
@@ -946,14 +948,15 @@ def generate_route_with_external_fallback(
     except ValueError as osmnx_err:
         logger.warning("osmnx_failed", error=str(osmnx_err))
 
+    start_lat = G.nodes[start_node]["y"]
+    start_lng = G.nodes[start_node]["x"]
+
     # Stage 2: GraphHopper
     if graphhopper_api_key:
         try:
-            from app.clients.graphhopper import fetch_round_trip
+            from app.clients.graphhopper import fetch_round_trip as gh_fetch
 
-            start_lat = G.nodes[start_node]["y"]
-            start_lng = G.nodes[start_node]["x"]
-            coords = fetch_round_trip(
+            coords = gh_fetch(
                 start_lat,
                 start_lng,
                 target_distance_m,
@@ -965,8 +968,25 @@ def generate_route_with_external_fallback(
         except Exception as gh_err:
             logger.warning("graphhopper_failed", error=str(gh_err))
 
+    # Stage 3: OpenRouteService
+    if openrouteservice_api_key:
+        try:
+            from app.clients.openrouteservice import fetch_round_trip as ors_fetch
+
+            coords = ors_fetch(
+                start_lat,
+                start_lng,
+                target_distance_m,
+                profile.name,
+                openrouteservice_api_key,
+            )
+            logger.info("ors_fallback_used", target_m=round(target_distance_m))
+            return RouteResult(coordinates=coords, method="ors", node_path=None)
+        except Exception as ors_err:
+            logger.warning("ors_failed", error=str(ors_err))
+
     raise ValueError(
         f"All routing methods failed for {target_distance_m / 1000:.1f} km "
         f"from node {start_node}. "
-        "Provide a valid graphhopper_api_key to enable external fallback."
+        "Provide graphhopper_api_key or openrouteservice_api_key to enable external fallbacks."
     )
