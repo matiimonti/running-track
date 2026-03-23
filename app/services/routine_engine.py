@@ -7,6 +7,7 @@ from app.services.run_profiles import RunProfile
 
 _DEFAULT_SURFACE_WEIGHT = 2.0  # cost for unknown surface type
 _DEFAULT_HIGHWAY_WEIGHT = 1.5  # cost for unknown highway type
+_REPETITION_PENALTY = 5.0  # edges already used cost 5× more on return path
 
 
 def snap_to_nearest_node(G: nx.MultiDiGraph, lat: float, lng: float) -> int:
@@ -90,6 +91,32 @@ def compute_edge_cost(edge_data: dict, profile: RunProfile) -> float:
         )
 
     return length * surface_weight * highway_weight * grade_multiplier
+
+
+
+def build_used_edges(path: list[int]) -> set[tuple[int, int]]:
+    """
+    Build a set of (u, v) edge tuples from a node path.
+    Used to penalise re-traversal on the return leg.
+    """
+    return {(path[i], path[i + 1]) for i in range(len(path) - 1)}
+
+
+def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = None):
+    """
+    Return a weight function compatible with nx.astar_path(weight=...).
+
+    nx calls it as weight(u, v, edge_data) for each candidate edge.
+    If used_edges is provided, edges already in the set get a ×5 penalty.
+    """
+    def cost_fn(u: int, v: int, edge_data: dict) -> float:
+        base = compute_edge_cost(edge_data, profile)
+        if used_edges and (u, v) in used_edges:
+            return base * _REPETITION_PENALTY
+        return base
+
+    return cost_fn
+
 
 
 
