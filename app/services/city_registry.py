@@ -7,6 +7,7 @@ and approximate bounding box. The graph will be downloaded on first request.
 
 from dataclasses import dataclass
 from app.logging_config import logger
+from app.services.validators import haversine_km
 
 
 @dataclass
@@ -55,16 +56,7 @@ def get_city(slug: str) -> City:
 
 def find_nearest_city(lat: float, lng: float) -> City:
     """Find the closest supported city to a given coordinate."""
-    import math
-
-    def distance(city: City) -> float:
-        dlat = lat - city.lat
-        dlng = lng - city.lng
-        return math.sqrt(dlat**2 + dlng**2)
-
-    nearest = min(CITIES.values(), key=distance)
-    dist_deg = distance(nearest)
-    dist_km = dist_deg * 111  # rough conversion degrees → km
-
+    nearest = min(CITIES.values(), key=lambda city: haversine_km(lat, lng, city.lat, city.lng))
+    dist_km = haversine_km(lat, lng, nearest.lat, nearest.lng)
     logger.info("nearest_city_found", city=nearest.slug, dist_km=round(dist_km, 1))
     return nearest
