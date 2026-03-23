@@ -500,10 +500,6 @@ def extend_path_to_target(
     return extended
 
 
-# ---------------------------------------------------------------------------
-# Waypoint extraction
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Waypoint:
     lat: float
@@ -640,3 +636,119 @@ def extract_waypoints(G: nx.MultiDiGraph, path: list[int]) -> list[Waypoint]:
 
     logger.info("waypoints_extracted", count=len(waypoints), path_nodes=len(path))
     return waypoints
+
+
+@dataclass
+class ElevationPoint:
+    distance_m: float   # cumulative distance along the route at this point
+    elevation_m: float  # metres above sea level
+
+
+def extract_elevation_profile(G: nx.MultiDiGraph, path: list[int]) -> list[ElevationPoint]:
+    """
+    Build an elevation profile as a list of (distance_along_route, elevation) pairs.
+
+    Every node in the path is included so the chart has full resolution.
+    Cumulative distance is computed from edge lengths.
+    """
+    if len(path) < 1:
+        raise ValueError("Path must have at least 1 node.")
+
+    profile: list[ElevationPoint] = []
+    cumulative_m = 0.0
+
+    profile.append(ElevationPoint(
+        distance_m=0.0,
+        elevation_m=G.nodes[path[0]].get("elevation", 0.0),
+    ))
+
+    for i in range(1, len(path)):
+        edge_data = min(
+            G[path[i - 1]][path[i]].values(),
+            key=lambda d: d.get("length", float("inf")),
+        )
+        cumulative_m += edge_data.get("length", 0.0)
+        profile.append(ElevationPoint(
+            distance_m=round(cumulative_m, 1),
+            elevation_m=G.nodes[path[i]].get("elevation", 0.0),
+        ))
+
+    logger.info(
+        "elevation_profile_extracted",
+        points=len(profile),
+        total_m=round(cumulative_m),
+    )
+    return profile
+
+
+@dataclass
+class RouteMetadata:
+    total_distance_m: float
+    elevation_gain_m: float          # sum of all uphill segments
+    elevation_loss_m: float          # sum of all downhill segments (positive value)
+    estimated_time_min: float        # based on profile pace
+    surface_breakdown: dict          # surface_type -> % of total distance (0–100)
+
+
+def compute_route_metadata(
+    G: nx.MultiDiGraph,
+    path: list[int],
+    profile: RunProfile,
+) -> RouteMetadata:
+    """
+    Compute summary statistics for a generated route.
+
+    Elevation gain/loss uses per-edge elevation_start/elevation_end attributes
+    attached by graph_service.compute_edge_grades.
+    Surface breakdown sums edge lengths by surface_type and converts to %.
+    Estimated time uses profile.pace_min_per_km × total distance.
+    """
+    total_distance_m = 0.0
+    elevation_gain_m = 0.0
+    elevation_loss_m = 0.0
+    surface_lengths: dict[str, float] = {}
+
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i + 1]
+        edge_data = min(G[u][v].values(), key=lambda d: d.get("length", float("inf")))
+
+        length = edge_data.get("length", 0.0)
+        total_distance_m += length
+
+        # Elevation gain/loss
+        elev_start = edge_data.get("elevation_start", G.nodes[u].get("elevation", 0.0))
+        elev_end = edge_data.get("elevation_end", G.nodes[v].get("elevation", 0.0))
+        delta = elev_end - elev_start
+        if delta > 0:
+            elevation_gain_m += delta
+        else:
+            elevation_loss_m += abs(delta)
+
+        # Surface breakdown
+        surface = edge_data.get("surface_type", "unknown")
+        surface_lengths[surface] = surface_lengths.get(surface, 0.0) + length
+
+    # Convert surface lengths to percentages
+    surface_breakdown = {
+        surface: round((length / total_distance_m) * 100, 1) if total_distance_m > 0 else 0.0
+        for surface, length in surface_lengths.items()
+    }
+
+    estimated_time_min = round((total_distance_m / 1000) * profile.pace_min_per_km, 1)
+
+    logger.info(
+        "route_metadata_computed",
+        distance_m=round(total_distance_m),
+        gain_m=round(elevation_gain_m),
+        loss_m=round(elevation_loss_m),
+        time_min=estimated_time_min,
+        profile=profile.name,
+    )
+
+    return RouteMetadata(
+        total_distance_m=round(total_distance_m, 1),
+        elevation_gain_m=round(elevation_gain_m, 1),
+        elevation_loss_m=round(elevation_loss_m, 1),
+        estimated_time_min=estimated_time_min,
+        surface_breakdown=surface_breakdown,
+    )
