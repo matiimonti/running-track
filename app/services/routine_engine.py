@@ -1,5 +1,5 @@
-# app/services/routing_engine.py
-
+import math
+import random
 import networkx as nx
 from app.logging_config import logger
 from app.services.validators import haversine_km
@@ -8,7 +8,7 @@ from app.services.run_profiles import RunProfile
 _DEFAULT_SURFACE_WEIGHT = 2.0  # cost for unknown surface type
 _DEFAULT_HIGHWAY_WEIGHT = 1.5  # cost for unknown highway type
 _REPETITION_PENALTY = 5.0  # edges already used cost 5× more on return path
-
+_EARTH_RADIUS_KM = 6371.0
 
 def snap_to_nearest_node(G: nx.MultiDiGraph, lat: float, lng: float) -> int:
     """
@@ -118,6 +118,134 @@ def make_cost_fn(profile: RunProfile, used_edges: set[tuple[int, int]] | None = 
     return cost_fn
 
 
+def _project_coordinate(lat: float, lng: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    """
+    Project a coordinate distance_km away from (lat, lng) along bearing_deg.
+    bearing_deg: 0 = north, 90 = east, 180 = south, 270 = west.
+    Returns (new_lat, new_lng).
+    """
+    bearing = math.radians(bearing_deg)
+    lat_r = math.radians(lat)
+    lng_r = math.radians(lng)
+    d = distance_km / _EARTH_RADIUS_KM
+
+    new_lat_r = math.asin(
+        math.sin(lat_r) * math.cos(d)
+        + math.cos(lat_r) * math.sin(d) * math.cos(bearing)
+    )
+    new_lng_r = lng_r + math.atan2(
+        math.sin(bearing) * math.sin(d) * math.cos(lat_r),
+        math.cos(d) - math.sin(lat_r) * math.sin(new_lat_r),
+    )
+    return math.degrees(new_lat_r), math.degrees(new_lng_r)
+
+
+def _haversine_cost_heuristic(G: nx.MultiDiGraph, goal: int):
+    """
+    Return an A* heuristic function: estimated cost from any node to goal.
+    Uses haversine distance scaled by minimum edge cost (1.0) so it's admissible.
+    """
+    goal_lat = G.nodes[goal]["y"]
+    goal_lng = G.nodes[goal]["x"]
+
+    def heuristic(u: int, v: int) -> float:
+        node_lat = G.nodes[u]["y"]
+        node_lng = G.nodes[u]["x"]
+        return haversine_km(node_lat, node_lng, goal_lat, goal_lng) * 1000  # convert to metres
+
+    return heuristic
+
+
+def _path_length_m(G: nx.MultiDiGraph, path: list[int]) -> float:
+    """Sum edge lengths along a node path in metres."""
+    total = 0.0
+    for i in range(len(path) - 1):
+        edge_data = min(G[path[i]][path[i + 1]].values(), key=lambda d: d.get("length", 0))
+        total += edge_data.get("length", 0.0)
+    return total
+
+
+def generate_loop(
+    G: nx.MultiDiGraph,
+    start_node: int,
+    target_distance_m: float,
+    profile: RunProfile,
+    bearing_deg: float | None = None,
+) -> list[int]:
+    """
+    Generate a loop route using two A* passes.
+
+    Pass 1: start → midpoint (no repetition penalty)
+    Pass 2: midpoint → start (with repetition penalty on outbound edges)
+
+    Returns the combined node path (start node appears at both ends).
+    Raises ValueError if no valid loop is found within ±10% of target distance.
+    """
+    if bearing_deg is None:
+        bearing_deg = random.uniform(0, 360)
+
+    start_lat = G.nodes[start_node]["y"]
+    start_lng = G.nodes[start_node]["x"]
+
+    # Project midpoint coordinate D/2 away along bearing
+    mid_lat, mid_lng = _project_coordinate(
+        start_lat, start_lng, bearing_deg, (target_distance_m / 1000) / 2
+    )
+    mid_node = snap_to_nearest_node(G, mid_lat, mid_lng)
+
+    if mid_node == start_node:
+        raise ValueError("Midpoint snapped to start node — graph may be too sparse for this distance.")
+
+    # Pass 1: outbound (no penalty)
+    outbound_cost_fn = make_cost_fn(profile, used_edges=None)
+    try:
+        outbound = nx.astar_path(
+            G,
+            start_node,
+            mid_node,
+            heuristic=_haversine_cost_heuristic(G, mid_node),
+            weight=outbound_cost_fn,
+        )
+    except nx.NetworkXNoPath:
+        raise ValueError(f"No path found from start to midpoint node {mid_node}.")
+
+    # Pass 2: return with anti-repetition penalty
+    used = build_used_edges(outbound)
+    return_cost_fn = make_cost_fn(profile, used_edges=used)
+    try:
+        return_path = nx.astar_path(
+            G,
+            mid_node,
+            start_node,
+            heuristic=_haversine_cost_heuristic(G, start_node),
+            weight=return_cost_fn,
+        )
+    except nx.NetworkXNoPath:
+        raise ValueError(f"No return path found from midpoint node {mid_node} to start.")
+
+    # Combine: outbound + return (drop duplicate midpoint node at the join)
+    full_path = outbound + return_path[1:]
+
+    # Validate distance within ±10%
+    actual_m = _path_length_m(G, full_path)
+    lower = target_distance_m * 0.9
+    upper = target_distance_m * 1.1
+
+    if not (lower <= actual_m <= upper):
+        raise ValueError(
+            f"Loop distance {actual_m:.0f}m is outside ±10% of target {target_distance_m:.0f}m."
+        )
+
+    logger.info(
+        "loop_generated",
+        start=start_node,
+        mid=mid_node,
+        nodes=len(full_path),
+        actual_m=round(actual_m),
+        target_m=round(target_distance_m),
+        bearing=round(bearing_deg, 1),
+    )
+    return full_path
 
 
 
