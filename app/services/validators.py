@@ -40,14 +40,13 @@ def validate_bounding_box(
 ) -> None:
     """
     Validate that the route won't require a graph area too large to process.
-    A route of distance D km needs a graph radius of roughly D/2 km.
+    A route of distance D km can extend at most D km from the start in any direction,
+    so D is the safe upper bound on required graph radius.
     """
-    required_radius = distance_km / 2
-    if required_radius > max_radius_km:
+    if distance_km > max_radius_km:
         raise ValueError(
-            f"Requested distance {distance_km}km requires a {required_radius}km radius graph. "
-            f"Maximum supported radius is {max_radius_km}km. "
-            f"Try a shorter distance."
+            f"Requested distance {distance_km}km exceeds the maximum supported "
+            f"graph radius of {max_radius_km}km. Try a shorter distance."
         )
 
 
