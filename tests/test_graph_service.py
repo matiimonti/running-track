@@ -1,11 +1,8 @@
 import pytest
 import networkx as nx
 from unittest.mock import patch
-from app.services.graph_service import (
-    attach_elevation,
-    compute_edge_grades,
-    tag_edges,
-)
+from app.services.graph_service import attach_elevation, compute_edge_grades
+from app.services.edge_tagger import tag_edges
 from app.services.run_profiles import get_profile
 from app.services.validators import validate_route_request
 from app.services.city_registry import find_nearest_city, get_city
@@ -30,8 +27,8 @@ def make_simple_graph() -> nx.MultiDiGraph:
 
 def test_attach_elevation_adds_to_all_nodes():
     G = make_simple_graph()
-    with patch("app.services.graph_service.elevation_data") as mock_elev:
-        mock_elev.get_elevation.return_value = 200.0
+    with patch("app.services.graph_service._get_elevation_data") as mock_fn:
+        mock_fn.return_value.get_elevation.return_value = 200.0
         G = attach_elevation(G, "test")
     for node_id, data in G.nodes(data=True):
         assert "elevation" in data
@@ -41,8 +38,8 @@ def test_attach_elevation_adds_to_all_nodes():
 def test_attach_elevation_handles_none():
     """Nodes with no SRTM data should get elevation=0.0, not crash."""
     G = make_simple_graph()
-    with patch("app.services.graph_service.elevation_data") as mock_elev:
-        mock_elev.get_elevation.return_value = None
+    with patch("app.services.graph_service._get_elevation_data") as mock_fn:
+        mock_fn.return_value.get_elevation.return_value = None
         G = attach_elevation(G, "test")
     for node_id, data in G.nodes(data=True):
         assert data["elevation"] == 0.0
