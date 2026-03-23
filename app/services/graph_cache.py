@@ -6,6 +6,7 @@ invalidation logic — graphs older than MAX_AGE_DAYS are
 considered stale and will be rebuilt on next request.
 """
 
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -32,12 +33,16 @@ def _save_manifest(manifest: dict) -> None:
 
 def record_graph_built(city_slug: str) -> None:
     """Record that a graph was just built for a city."""
-    manifest = _load_manifest()
-    manifest[city_slug] = {
-        "built_at": datetime.now(timezone.utc).isoformat(),
-        "built_at_ts": time.time(),
-    }
-    _save_manifest(manifest)
+    GRAPH_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = GRAPH_DIR / "manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        manifest = _load_manifest()
+        manifest[city_slug] = {
+            "built_at": datetime.now(timezone.utc).isoformat(),
+            "built_at_ts": time.time(),
+        }
+        _save_manifest(manifest)
     logger.info("graph_cache_recorded", city=city_slug)
 
 
@@ -71,16 +76,20 @@ def is_graph_stale(city_slug: str) -> bool:
 def invalidate_graph(city_slug: str) -> None:
     """Force a graph to be rebuilt on next request."""
     graph_path = GRAPH_DIR / f"{city_slug}.graphml"
-    manifest = _load_manifest()
 
     if graph_path.exists():
         graph_path.unlink()
         logger.info("graph_file_deleted", city=city_slug)
 
-    if city_slug in manifest:
-        del manifest[city_slug]
-        _save_manifest(manifest)
-        logger.info("graph_manifest_cleared", city=city_slug)
+    GRAPH_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = GRAPH_DIR / "manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        manifest = _load_manifest()
+        if city_slug in manifest:
+            del manifest[city_slug]
+            _save_manifest(manifest)
+    logger.info("graph_manifest_cleared", city=city_slug)
 
 
 def get_cache_status() -> dict:
