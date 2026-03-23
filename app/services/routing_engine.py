@@ -384,9 +384,11 @@ def generate_loop_with_fallback(
     start_lng = G.nodes[start_node]["x"]
 
     def _pick_bearing() -> float:
-        """Pick a bearing: apply profile offset to base (or random if no base)."""
+        """Pick a bearing: apply profile offset to base (or random if no base).
+        Adds ±45° jitter so successive retry attempts explore different midpoints."""
         b = base_bearing if base_bearing is not None else random.uniform(0, 360)
-        return (b + profile.bearing_offset) % 360
+        jitter = random.uniform(-45, 45)
+        return (b + profile.bearing_offset + jitter) % 360
 
     def _try_loop(tolerance: float) -> list[int] | None:
         bearing = _pick_bearing()
