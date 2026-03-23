@@ -752,3 +752,83 @@ def compute_route_metadata(
         estimated_time_min=estimated_time_min,
         surface_breakdown=surface_breakdown,
     )
+
+
+def score_route(G: nx.MultiDiGraph, path: list[int], profile: RunProfile) -> int:
+    """
+    Score a route from 0 to 100 based on three components:
+
+      Surface match  (40 pts) — how well edge surfaces align with the profile.
+                                 Weight 1.0 = perfect, higher = worse.
+      Grade comfort  (40 pts) — fraction of route within max_comfortable_grade.
+      Strava popularity (20 pts) — edge-level popularity score if available,
+                                    otherwise neutral (10 pts).
+
+    Returns an integer in [0, 100].
+    """
+    _SURFACE_WEIGHT_CAP = 5.0   # weights above this are treated as worst-case
+    _WEIGHT_SURFACE = 40
+    _WEIGHT_GRADE = 40
+    _WEIGHT_POPULARITY = 20
+
+    min_surface_w = min(profile.surface_weights.values())
+
+    surface_score_sum = 0.0
+    grade_score_sum = 0.0
+    popularity_score_sum = 0.0
+    total_length = 0.0
+    popularity_data_present = False
+
+    for i in range(len(path) - 1):
+        u, v = path[i], path[i + 1]
+        edge_data = min(G[u][v].values(), key=lambda d: d.get("length", float("inf")))
+        length = edge_data.get("length", 0.0)
+        if length <= 0:
+            continue
+        total_length += length
+
+        # Surface score: normalize weight to [0, 1] where 1 = best match
+        surface_type = edge_data.get("surface_type", "unknown")
+        surface_w = profile.surface_weights.get(surface_type, _DEFAULT_SURFACE_WEIGHT)
+        surface_w = min(surface_w, _SURFACE_WEIGHT_CAP)
+        surface_score = 1.0 - (surface_w - min_surface_w) / (_SURFACE_WEIGHT_CAP - min_surface_w)
+        surface_score_sum += surface_score * length
+
+        # Grade score: 1.0 at or below comfort threshold, decays above it
+        grade = abs(edge_data.get("grade", 0.0))
+        if grade <= profile.max_comfortable_grade:
+            grade_score = 1.0
+        else:
+            overage = grade - profile.max_comfortable_grade
+            grade_score = max(0.0, 1.0 - overage / profile.max_comfortable_grade)
+        grade_score_sum += grade_score * length
+
+        # Strava popularity: normalised to [0, 1], capped at 1000 hits
+        popularity = edge_data.get("popularity")
+        if popularity is not None:
+            popularity_data_present = True
+            popularity_score_sum += min(float(popularity) / 1000.0, 1.0) * length
+
+    if total_length == 0:
+        return 0
+
+    surface_component = (surface_score_sum / total_length) * _WEIGHT_SURFACE
+    grade_component = (grade_score_sum / total_length) * _WEIGHT_GRADE
+
+    if popularity_data_present:
+        popularity_component = (popularity_score_sum / total_length) * _WEIGHT_POPULARITY
+    else:
+        popularity_component = _WEIGHT_POPULARITY * 0.5  # neutral when no data
+
+    raw = surface_component + grade_component + popularity_component
+    score = max(0, min(100, round(raw)))
+
+    logger.info(
+        "route_scored",
+        score=score,
+        surface_pts=round(surface_component, 1),
+        grade_pts=round(grade_component, 1),
+        popularity_pts=round(popularity_component, 1),
+        profile=profile.name,
+    )
+    return score
