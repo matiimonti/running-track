@@ -9,8 +9,14 @@ from app.services.graph_cache import record_graph_built, is_graph_stale
 GRAPH_DIR = Path("data/graphs")
 GRAPH_DIR.mkdir(parents=True, exist_ok=True)
 
-# SRTM elevation data (cached locally after first download)
-elevation_data = srtm.get_data()
+# Lazily initialised — srtm.get_data() hits the filesystem and should not run on import
+_elevation_data = None
+
+def _get_elevation_data():
+    global _elevation_data
+    if _elevation_data is None:
+        _elevation_data = srtm.get_data()
+    return _elevation_data
 
 
 def get_graph_path(city_slug: str) -> Path:
@@ -40,7 +46,7 @@ def attach_elevation(G: nx.MultiDiGraph, city_slug: str) -> nx.MultiDiGraph:
     for node_id, data in G.nodes(data=True):
         lat = data.get("y")
         lon = data.get("x")
-        elev = elevation_data.get_elevation(lat, lon)
+        elev = _get_elevation_data().get_elevation(lat, lon)
         if elev is None:
             elev = 0.0
             missing += 1
