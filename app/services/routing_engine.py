@@ -1,5 +1,6 @@
 import math
 import random
+from dataclasses import dataclass
 import networkx as nx
 from app.logging_config import logger
 from app.services.validators import haversine_km
@@ -10,6 +11,63 @@ _DEFAULT_HIGHWAY_WEIGHT = 1.5  # cost for unknown highway type
 _REPETITION_PENALTY = 5.0  # edges already used cost 5× more on return path
 _EARTH_RADIUS_KM = 6371.0
 _FALLBACK_ATTEMPTS_PER_TOLERANCE = 3
+
+# Highway types that indicate a dangerous road crossing
+_CROSSING_HIGHWAY_TYPES = {"motorway", "trunk", "motorway_link", "trunk_link"}
+
+
+@dataclass
+class CrossingWarning:
+    node_id: int
+    lat: float
+    lng: float
+    highway_type: str  # the dangerous road type adjacent to this node
+
+
+def detect_crossings(G: nx.MultiDiGraph, path: list[int]) -> list[CrossingWarning]:
+    """
+    Flag nodes in the path that are adjacent to motorway or trunk edges.
+
+    In OSM, a node shared between a footway/path and a motorway is a crossing
+    point — the runner physically crosses or joins a dangerous road there.
+
+    Returns a list of CrossingWarning (one per flagged node, deduplicated).
+    """
+    warnings: list[CrossingWarning] = []
+    seen: set[int] = set()
+
+    for node in path:
+        if node in seen:
+            continue
+
+        for neighbor in G.successors(node):
+            edge_data = min(
+                G[node][neighbor].values(),
+                key=lambda d: d.get("length", float("inf")),
+            )
+            highway_type = edge_data.get("highway_type", "unknown")
+            if highway_type in _CROSSING_HIGHWAY_TYPES:
+                warnings.append(
+                    CrossingWarning(
+                        node_id=node,
+                        lat=G.nodes[node]["y"],
+                        lng=G.nodes[node]["x"],
+                        highway_type=highway_type,
+                    )
+                )
+                seen.add(node)
+                break  # one warning per node is enough
+
+    if warnings:
+        logger.warning(
+            "crossing_detected",
+            count=len(warnings),
+            nodes=[w.node_id for w in warnings],
+        )
+    else:
+        logger.info("crossing_check_clean", path_nodes=len(path))
+
+    return warnings
 
 
 def snap_to_nearest_node(G: nx.MultiDiGraph, lat: float, lng: float) -> int:
