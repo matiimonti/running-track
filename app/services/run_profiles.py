@@ -30,6 +30,17 @@ class RunProfile:
     # Whether to allow steps
     allow_steps: bool
 
+    # Degrees added to the shared base bearing so each run type fans out in a
+    # different direction when routes are generated from the same start point.
+    bearing_offset: float
+
+    # Fraction of target distance used to project the midpoint node.
+    # Smaller = tighter loop, larger = more direct out-and-back shape.
+    midpoint_factor: float
+
+    # Expected pace in minutes per km — used to estimate finish time.
+    pace_min_per_km: float
+
 
 CITY = RunProfile(
     name="city",
@@ -64,6 +75,9 @@ CITY = RunProfile(
     },
     prefer_popular=True,
     allow_steps=False,
+    bearing_offset=0.0,    # reference direction — other types fan out from here
+    midpoint_factor=0.50,  # standard loop shape
+    pace_min_per_km=5.5,   # comfortable urban tempo
 )
 
 TRAIL = RunProfile(
@@ -99,6 +113,9 @@ TRAIL = RunProfile(
     },
     prefer_popular=True,
     allow_steps=True,
+    bearing_offset=90.0,   # explores 90° offset from city — different quadrant
+    midpoint_factor=0.45,  # tighter midpoint = more winding return, more trail coverage
+    pace_min_per_km=7.0,   # slower on natural surfaces and hills
 )
 
 SCENIC = RunProfile(
@@ -134,6 +151,9 @@ SCENIC = RunProfile(
     },
     prefer_popular=True,
     allow_steps=False,
+    bearing_offset=180.0,  # explores opposite direction from city
+    midpoint_factor=0.40,  # closer midpoint = more time exploring the area
+    pace_min_per_km=6.0,   # relaxed sightseeing pace
 )
 
 INTERVAL = RunProfile(
@@ -169,6 +189,9 @@ INTERVAL = RunProfile(
     },
     prefer_popular=True,
     allow_steps=False,
+    bearing_offset=270.0,  # explores 270° offset — last of the four quadrants
+    midpoint_factor=0.55,  # farther midpoint = straighter, more direct loop
+    pace_min_per_km=4.5,   # faster speed work pace
 )
 
 # Registry — look up profile by name

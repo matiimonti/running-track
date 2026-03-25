@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     strava_client_secret: str = ""
     claude_api_key: str = ""
     mapbox_token: str = ""
+    graphhopper_api_key: str = ""
+    openrouteservice_api_key: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379"
